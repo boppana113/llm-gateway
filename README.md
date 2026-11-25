@@ -4,6 +4,8 @@ A local LLM gateway in Rust. Claude Code and Pydantic AI scripts send their traf
 
 The curriculum, progress and notes live in `~/selfstudy/rust/` (`curriculum.md`, `progress.md`). This file lists only the references.
 
+**Current task:** [Stage 1: gateway config and `find_key`](docs/stage-1-config.md)
+
 ## The design source
 
 **[pydantic/pydantic-ai-gateway](https://github.com/pydantic/pydantic-ai-gateway)**: TypeScript on Cloudflare Workers, archived 2026-03.
