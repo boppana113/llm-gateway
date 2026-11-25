@@ -4,45 +4,63 @@
 
 **The ownership rule for this stage:** `Config` owns everything. Everyone else borrows from it.
 
-Full walkthrough: `~/selfstudy/rust/journey/01-ownership.md`, Part 8.
+**Design:** nested and keyed by id, like Pydantic's config. Users live inside their project, and API keys are keyed by the secret string itself.
+
+Full walkthrough: `~/selfstudy/rust/journey/01-ownership.md`, Part 8 (it describes the flat `Vec` version; this file is the nested one you're building).
 
 ---
 
-## Before you start: Pydantic's version (10 min)
-
-In the build session, Claude walks you through `deploy/example.config.ts` and `gateway/src/types.ts`. What to notice:
-- **Projects** have users and optional spending limits (daily/weekly/monthly).
-- **API keys** belong to a project, optionally to a user, and list which **providers** they may use.
-- **Providers** have a `providerId`, a `baseUrl`, and `credentials` read from an env var.
-- In TS every object is a shared, mutable reference. In Rust you decide who owns each piece.
-
 ## Step 0: Create the repo ✅
-
-Done: `cargo new`, `serde` (with `derive`), and `toml` are in `Cargo.toml`.
 
 ## Step 1: The types (`src/config.rs`)
 
 Every field is owned (`String`, not `&str`). Be ready to say why.
 
-| Struct | Fields |
-|---|---|
-| `Config` | `projects: Vec<Project>`, `users: Vec<User>`, `api_keys: Vec<ApiKey>`, `providers: Vec<ProviderConfig>` |
-| `Project` | `id: u32`, `name: String`, `spending_limit_daily: Option<f64>` |
-| `User` | `id: u32`, `project_id: u32`, `name: String`, `spending_limit_daily: Option<f64>` |
-| `ApiKey` | `id: u32`, `key: String`, `project_id: u32`, `user_id: Option<u32>`, `providers: Vec<String>` |
-| `ProviderConfig` | `name: String`, `provider_id: String`, `base_url: String`, `credentials_env: String` |
+```
+Config
+├── projects:  HashMap<u32, Project>        // id → project
+│   └── Project { name, users: HashMap<u32, User>, spending_limit_daily: Option<f64> }
+│       └── User { name, spending_limit_daily: Option<f64> }
+├── providers: HashMap<String, Provider>    // "anthropic" → provider
+│   └── Provider { provider_id: ProviderId, base_url, inject_cost: bool, credentials_env }
+└── api_keys:  HashMap<String, ApiKey>      // "sk-gw-…" → key
+    └── ApiKey { id: u32, project: u32, user: Option<u32>, providers: Vec<String>,
+                 spending_limit_total: Option<f64> }
+```
 
-- `credentials_env` holds the **name** of the env var, never the secret. (`provider_id` becomes an enum in stage 2.)
-- Derive `Debug, Deserialize`. Add `mod config;` to `main.rs`.
-- **Test first:** build a `Config` by hand in a `#[test]` and assert `config.api_keys.len() == 1`.
-- ⚠️ `#[derive(Debug)]` on `ApiKey` prints the raw key. Step 4 fixes that.
+- `credentials_env` holds the **name** of the env var (`"ANTHROPIC_API_KEY"`), never the secret.
+- Use `f64` for every money field.
+- Derive `Debug, Deserialize` on all of them, including `Config`. Add `mod config;` to `main.rs`.
+- **Test first:** build a `Config` by hand (struct literals, `HashMap::from([...])`) with one of each, and assert `config.api_keys.len() == 1`.
 
 ## Step 2: Load from TOML
 
-- Write `config.example.toml` with `[[projects]]`, `[[users]]`, `[[api_keys]]`, `[[providers]]`. Fake keys only (`sk-gw-test-...`). Your real config goes in `gateway.toml`, which is gitignored.
-- `fn from_toml(s: &str) -> Config`: `toml::from_str(s).expect("bad config")`. (`Result` comes in stage 2.)
+`config.example.toml` (fake keys only; your real one is `gateway.toml`, which is gitignored):
+
+```toml
+[projects.1]
+name = "default"
+spending_limit_daily = 10.0
+
+[projects.1.users.2]
+name = "Samuel"
+
+[providers.anthropic]
+provider_id = "anthropic"
+base_url = "https://api.anthropic.com"
+inject_cost = true
+credentials_env = "ANTHROPIC_API_KEY"
+
+[api_keys."sk-gw-test-abc123"]
+id = 3
+project = 1
+user = 2
+providers = ["anthropic"]
+```
+
+- `fn from_toml(s: &str) -> Config`: `toml::from_str(s).expect("bad config")`.
 - `fn load(path: &str) -> Config`: `std::fs::read_to_string`, then `from_toml`.
-- **Test:** parse an inline `r#"..."#` string and check one field from each section.
+- **Test:** parse an inline `r#"..."#` string and check one field from each section, including the nested user.
 - **Answer:** `from_toml` takes `&str`, but `Config` holds owned `String`s. Where did the bytes get copied?
 
 ## Step 3: `find_key`
@@ -54,37 +72,38 @@ impl Config {
 ```
 
 - **Tests first:** a key that exists (`Some`, check its `id`) and one that doesn't (`None`).
-- Write it with `for k in &self.api_keys { ... }`, then rewrite it as `self.api_keys.iter().find(...)`.
-- **On purpose (E0507):** change the return type to `Option<ApiKey>`. Read the error. Change it back.
-- **On purpose (E0502):** in a test, hold `let k = cfg.find_key(..)`, then `cfg.api_keys.push(..)`, then use `k`. Why is the compiler right?
+- With a `HashMap` this is one call. Look at what `HashMap::get` returns, and notice you can pass a `&str` to a map whose keys are `String`.
+- **On purpose (E0507):** change the return type to `Option<ApiKey>` and try to make it compile by dereferencing (`.map(|k| *k)`). Read the error. Change it back.
+- **On purpose (E0502):** in a test, hold `let k = cfg.find_key(..)`, then `cfg.api_keys.insert(..)`, then use `k`. Why is the compiler right? (Hint: what can `insert` do to the map's memory?)
 
 ## Step 4: Lookups that chain borrows
 
-- `fn project_for(&self, key: &ApiKey) -> Option<&Project>`: follow `key.project_id`.
+- `fn project_for(&self, key: &ApiKey) -> Option<&Project>`: follow `key.project`.
+- `fn user_for(&self, key: &ApiKey) -> Option<&User>`: two hops, `key.user` (an `Option`) then the project's `users` map. Every reference you return borrows from `self`.
 - `fn allows(&self, key: &ApiKey, provider: &str) -> bool`: does `key.providers` contain it? (`&String` vs `&str`: `.iter().any(|p| p == provider)` works.)
-- **Redaction:** replace the derived `Debug` on `ApiKey` with a hand-written `impl std::fmt::Debug` that prints `key: "sk-gw-…"` (first 6 chars + ellipsis). Test that `format!("{:?}", k)` doesn't contain the full key.
-- **On purpose (E0106):** write a free function `fn find_in(keys: &[ApiKey], key: &str) -> Option<&ApiKey>`. Elision fails with two input refs. Add `'a`. Should the result borrow from `keys` or `key`?
+- **Redaction:** the secret is now a map key, so a derived `Debug` on **`Config`** prints every secret. Replace it with a hand-written `impl std::fmt::Debug for Config` that shows each key as `"sk-gw-…"` (first 6 chars + ellipsis). Test that `format!("{:?}", cfg)` doesn't contain the full key.
+- **On purpose (E0106):** write a free function `fn find_in(keys: &HashMap<String, ApiKey>, key: &str) -> Option<&ApiKey>`. Elision fails with two input refs. Add `'a`. Should the result borrow from `keys` or `key`?
 
 ## Step 5: Wire `main`
 
 ```sh
-cargo run -- check config.example.toml sk-gw-test-...
-# key #3 → project "default", providers: [anthropic]
+cargo run -- check config.example.toml sk-gw-test-abc123
+# key #3 → project "default", user "Samuel", providers: [anthropic]
 # or: unknown key
 ```
 
 - Never print the key itself.
 
-**Stretch:** a `HashMap<String, usize>` index (key → position in `api_keys`) so `find_key` is O(1). Why not store `HashMap<&str, &ApiKey>` inside `Config` itself? (Stage 5: self-referential structs.)
+**Stretch:** `find_key` is already O(1). Instead, try a method that **mutates** while it reads: `fn revoke(&mut self, key: &str) -> Option<ApiKey>` that removes and returns the key. Why can this one return an owned `ApiKey` when `find_key` couldn't?
 
 ---
 
 ## Done when
 
-- [ ] Config loads from TOML. `find_key`, `project_for`, and `allows` have passing tests.
+- [ ] Config loads from TOML. `find_key`, `project_for`, `user_for`, and `allows` have passing tests.
 - [ ] `cargo test` passes and `cargo clippy` has no warnings.
 - [ ] You've triggered and read out loud **E0382, E0502, E0507, E0106**, and run `rustc --explain` on each.
 - [ ] `Debug` output never shows a full key.
 - [ ] In about 60 seconds, you can explain ownership and borrowing, `String` vs `&str`, and why `find_key` returns `Option<&ApiKey>`.
 
-**Next:** `/rs-drill` for stage 1, then stage 2 (`enums-errors`): `provider_id` becomes an enum and `.expect` becomes `Result`.
+**Next:** `/rs-drill` for stage 1, then stage 2 (`enums-errors`): `.expect` becomes `Result`.
