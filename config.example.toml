@@ -1,0 +1,28 @@
+[[users]]
+id = 0
+name = "sri"
+
+[[users]]
+id = 1
+name = "tracy"
+spending_limit_daily = 1.0
+
+[[projects]]
+id = 0
+name = "cpb"
+user_ids = [0, 1]
+
+[[providers]]
+name="anthropic"
+provider_id="anthropic"
+base_url="https://api.anthropic.com"
+inject_cost=false
+credentials_env="ANTHROPIC_API_KEY"
+
+[[api_keys]]
+id = 0
+key = "sk-gw-test-abc123"
+project_id = 0
+providers = ["anthropic"]
+
+
