@@ -1,5 +1,4 @@
 use serde::Deserialize;
-use toml;
 
 #[derive(Debug, Deserialize)]
 struct User {
@@ -9,21 +8,32 @@ struct User {
 }
 
 #[derive(Debug, Deserialize)]
-struct Project {
+pub struct Project {
     user_ids: Vec<u32>,
     id: u32,
-    name: String,
+    pub name: String,
     spending_limit_daily: Option<f64>,
 }
-#[derive(Debug, Deserialize)]
-struct ApiKey {
-    id: u32,
+#[derive(Deserialize)]
+pub struct ApiKey {
+    pub id: u32,
     key: String,
     project_id: u32,
     user_id: Option<u32>,
-    providers: Vec<String>,
+    pub providers: Vec<String>,
 }
 
+impl std::fmt::Debug for ApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiKey")
+            .field("id", &self.id)
+            .field("key", &format!("{}...", &self.key[0..6]))
+            .field("project_id", &self.project_id)
+            .field("user_id", &self.user_id)
+            .field("providers", &self.providers)
+            .finish()
+    }
+}
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum ProviderId {
@@ -43,7 +53,7 @@ struct ProviderConfig {
 }
 
 #[derive(Debug, Deserialize)]
-struct Config {
+pub struct Config {
     projects: Vec<Project>,
     providers: Vec<ProviderConfig>,
     api_keys: Vec<ApiKey>,
@@ -59,13 +69,22 @@ impl Config {
         Config::from_toml(&s)
     }
     pub fn find_key(&self, key: &str) -> Option<&ApiKey> {
-        // for k in &self.api_keys {
-        //     if key == k.key {
-        //         return Some(k);
-        //     }
-        // }
         self.api_keys.iter().find(|k| k.key == key)
     }
+
+    pub fn project_for(&self, key: &ApiKey) -> Option<&Project> {
+        self.projects.iter().find(|p| p.id == key.project_id)
+    }
+}
+
+impl ApiKey {
+    pub fn allows(&self, key: &ApiKey, provider: &str) -> bool {
+        key.providers.iter().any(|p| p == provider)
+    }
+}
+
+fn find_in<'a>(keys: &'a [ApiKey], key: &str) -> Option<&'a ApiKey> {
+    keys.iter().find(|k| k.key == key)
 }
 
 #[cfg(test)]
@@ -151,5 +170,33 @@ mod tests {
             providers: vec!["anthropic".to_string()],
         };
         cfg.api_keys.push(b_key);
+    }
+    #[test]
+    fn test_project_for() {
+        let cfg = Config::load("config.example.toml");
+        let k = cfg.find_key("sk-gw-test-abc123").unwrap();
+        let p = cfg.project_for(k).unwrap();
+        assert_eq!(p.id, 0);
+    }
+
+    #[test]
+    fn test_allows() {
+        let cfg = Config::load("config.example.toml");
+        let k = cfg.find_key("sk-gw-test-abc123").unwrap();
+        let anthropic_allowed = k.allows(k, "anthropic");
+        assert!(anthropic_allowed);
+        let openai_allowed = k.allows(k, "openai");
+        assert!(!openai_allowed);
+    }
+
+    #[test]
+    fn test_redact_key() {
+        let cfg = Config::load("config.example.toml");
+        let k = cfg.find_key("sk-gw-test-abc123").unwrap();
+
+        let out = format!("{:?}", k); // the exact text println!("{:?}", k) would print
+
+        assert!(!out.contains("sk-gw-test-abc123")); // full key NOT in there
+        assert!(out.contains("sk-gw-")); // redacted form IS in there
     }
 }
