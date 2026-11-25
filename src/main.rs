@@ -9,14 +9,17 @@ fn main() {
     }
 
     let cfg = Config::load(&args[2]);
-    match cfg.find_key(&args[3]) {
-        Some(key) => match cfg.project_for(key) {
-            Some(project) => println!(
-                "key #{} -> project {:?}, providers: {:?}",
-                key.id, project.name, key.providers
-            ),
-            None => println!("key #{} points at a missing project", key.id),
-        },
-        None => println!("unknown key"),
-    }
+    let Some(key) = cfg.find_key(&args[3]) else {
+        println!("unknown key");
+        return;
+    };
+    let Some(project) = cfg.project_for(key) else {
+        println!("key #{} points at a missing project", key.id);
+        return;
+    };
+
+    println!(
+        "key #{} -> project {:?}, providers: {:?}",
+        key.id, project.name, key.providers
+    );
 }
